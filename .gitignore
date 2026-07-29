@@ -2,3 +2,5 @@
 *.err
 .DS_Store
 .agent-token
+.claude-flow/
+__pycache__/
