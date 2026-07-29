@@ -75,6 +75,17 @@ else
   bad "QwenMenu not running"
 fi
 
+# 5b. the request counter is derived from LocalAI's /metrics, so a broken or
+# unauthorised /metrics is the difference between a real figure and "unavailable"
+# in the menu. Checked here because it fails silently everywhere else.
+METRICS="$(curl -fsS --max-time 8 -H "Authorization: Bearer $KEY" "${BASE%/}/metrics" 2>/dev/null \
+  | grep -c '^api_call_count{.*path="/v1/chat/completions"' || true)"
+if [[ "${METRICS:-0}" -ge 1 ]]; then
+  ok "LocalAI /metrics readable -- 'Requests today' will show a real number"
+else
+  bad "cannot read api_call_count from ${BASE%/}/metrics -- the menu will say 'unavailable'"
+fi
+
 # 6. model residency, and a cold-start timing only if genuinely cold
 echo
 echo "model state"
@@ -86,14 +97,27 @@ if [[ -z "$SYS" ]]; then
 fi
 RESIDENT="$(printf '%s' "$SYS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("loaded_models") or []))' 2>/dev/null || echo "?")"
 if [[ "$RESIDENT" == "0" ]]; then
-  info "backend is cold -- timing one 20-token completion (this is the number worth having)"
+  # Reports the tokens LocalAI says it produced, not the tokens we asked for. A
+  # max_tokens=20 request that stops after two tokens looks impossibly fast, which
+  # is how a bogus "1.05s warm" figure got into this repo's README once already.
+  # Note this does load the model (~44 GiB): it is the price of a cold figure, and
+  # it is why the check does not loop.
+  info "backend is cold -- timing one completion, and loading the model to do it"
   T0=$(python3 -c 'import time;print(time.time())')
-  curl -fsS --max-time 300 -X POST \
+  RESP="$(curl -fsS --max-time 300 -X POST \
     -H "Content-Type: application/json" -H "Authorization: Bearer $KEY" \
-    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"say hi\"}],\"max_tokens\":20}" \
-    "${BASE%/}/v1/chat/completions" >/dev/null 2>&1
+    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Describe ocean currents in one paragraph.\"}],\"max_tokens\":64,\"temperature\":0}" \
+    "${BASE%/}/v1/chat/completions" 2>/dev/null)"
   T1=$(python3 -c 'import time;print(time.time())')
-  printf '  ....  cold start + 20 tokens: %.2fs\n' "$(python3 -c "print($T1-$T0)")"
+  CT="$(printf '%s' "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("usage",{}).get("completion_tokens",0))' 2>/dev/null || echo 0)"
+  if [[ "$CT" == "0" ]]; then
+    bad "completion returned no tokens -- see ~/Library/Logs/localai.log"
+  else
+    python3 -c "
+w = $T1 - $T0
+print(f'  ....  cold start + {$CT} tokens: {w:.2f}s  ({$CT/w:.2f} tok/s incl. load)')
+print(f'  ....  for reference, warm generation measured ~3.5 tok/s on this Mac')"
+  fi
 else
   info "backend is already warm ($RESIDENT model(s) resident) -- skipping the timing,"
   info "a warm number tells us nothing new. Re-run in a few minutes if you want the cold figure."
