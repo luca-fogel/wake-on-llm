@@ -56,7 +56,11 @@ enum Agent {
         guard let url = URL(string: AGENT + path) else { done(nil); return }
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.timeoutInterval = 330   // a cold warm-up can genuinely take minutes
+        // Must stay above the agent's own worst case for /on: up to 60s waiting for
+        // LocalAI's LaunchAgent to answer, plus a 180s warm-up timeout = 240s. 330
+        // leaves margin; anything below 240 would time out here while the agent was
+        // still legitimately working.
+        req.timeoutInterval = 330
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let body = body {
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -114,17 +118,25 @@ func classify(_ s: [String: Any]?) -> Power {
 
 // MARK: - app
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var item: NSStatusItem!
     let menu = NSMenu()
     var state: [String: Any]?
     var busy: String?
     var timer: Timer?
 
+    // removeAllItems() on a menu the user currently has open drops the item they
+    // were about to click and loses the highlight. The 5s poll must not do that, so
+    // while the menu is open we keep updating `state` and the status bar glyph but
+    // defer the menu rebuild until it closes.
+    var menuIsOpen = false
+    var rebuildDeferred = false
+
     func applicationDidFinishLaunching(_ n: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.menu = menu
         menu.autoenablesItems = false
+        menu.delegate = self
         rebuild()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: POLL_SECONDS, repeats: true) { [weak self] _ in
@@ -132,11 +144,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+        rebuild()          // one rebuild up front, while it is still safe
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+        if rebuildDeferred {
+            rebuildDeferred = false
+            rebuild()
+        }
+    }
+
     func refresh() {
         Agent.get("/state") { [weak self] s in
             guard let self = self else { return }
             if s != nil { self.state = s }
-            self.rebuild()
+            if self.menuIsOpen {
+                self.rebuildDeferred = true
+                self.updateStatusButton()   // glyph and tooltip are safe to touch
+            } else {
+                self.rebuild()
+            }
         }
     }
 
@@ -161,6 +191,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return m
     }
 
+    private func warning(_ text: String) -> NSMenuItem {
+        let m = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        m.isEnabled = false
+        m.attributedTitle = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: NSColor.systemOrange,
+            ])
+        if let img = NSImage(systemSymbolName: "battery.25", accessibilityDescription: nil) {
+            m.image = img
+        }
+        return m
+    }
+
     private func action(_ title: String, _ sel: Selector, symbol: String,
                         enabled: Bool = true, checked: Bool = false) -> NSMenuItem {
         let m = NSMenuItem(title: title, action: sel, keyEquivalent: "")
@@ -173,6 +218,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return m
     }
 
+    // Safe to call at any time, including while the menu is open.
+    func updateStatusButton() {
+        let power = classify(state)
+        guard let button = item.button else { return }
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        let img = NSImage(systemSymbolName: power.glyph, accessibilityDescription: power.label)?
+            .withSymbolConfiguration(cfg)
+        img?.isTemplate = false
+        button.image = img
+        button.contentTintColor = power.colour
+        var tip = "Qwen 2.5 72B — \(power.label)"
+        if let ac = state?["on_ac_power"] as? Bool, !ac { tip += " (on battery)" }
+        button.toolTip = tip
+    }
+
     func rebuild() {
         let s = state
         let power = classify(s)
@@ -180,17 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let counters = dictOf(s?["counters"])
         let working = busy != nil
 
-        // status bar itself: symbol tinted by state
-        if let button = item.button {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-            let img = NSImage(systemSymbolName: power.glyph, accessibilityDescription: power.label)?
-                .withSymbolConfiguration(cfg)
-            img?.isTemplate = false
-            button.image = img
-            button.contentTintColor = power.colour
-            button.toolTip = "Qwen 2.5 72B — \(power.label)"
-        }
-
+        updateStatusButton()
         menu.removeAllItems()
 
         // header
@@ -224,9 +274,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let ac = s["on_ac_power"] as? Bool {
                 menu.addItem(row("Power", ac ? "AC" : "battery"))
             }
-            menu.addItem(row("Requests", "\(intOf(counters["requests"]) + intOf(counters["warmups"])) today"))
+            // requests is null whenever LocalAI's /metrics could not be read. Show
+            // that rather than a number: the old row added warm-ups to a counter that
+            // was structurally always 0, so it was wrong in both directions.
+            if counters["requests"] is NSNull || counters["requests"] == nil {
+                menu.addItem(row("Requests", "unavailable"))
+            } else {
+                menu.addItem(row("Requests", "\(intOf(counters["requests"])) today"))
+            }
         } else {
             menu.addItem(row("Agent", "not reachable"))
+        }
+
+        // Hazard, not decoration: on battery the awake hold cannot survive a lid
+        // close, and if this Mac sleeps it leaves the tailnet and cannot be woken
+        // back. Say so before the user relies on Keep Warm, not after.
+        if let ac = s?["on_ac_power"] as? Bool, !ac {
+            menu.addItem(warning("On battery — sleeps on lid close"))
         }
         menu.addItem(.separator())
 
