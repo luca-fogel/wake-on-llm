@@ -25,9 +25,18 @@ LocalAI **spawns the llama-cpp backend per request and reaps it seconds after th
 response.** Verified on 2026-07-29, and the Pi's own dashboard shows the backend
 process has read `down` since 2026-07-28 22:22. So:
 
-- every request pays roughly **8 s of cold start**
-- generation runs about **2.3 tok/s** in that state
+- a request arriving **after** the backend was reaped pays roughly **8 s of cold start**
+- a request arriving **while it's still alive** is fast — measured 1.60 s then
+  1.05 s for a 20-token completion, back to back, on the Mac itself
 - `/system` → `loaded_models` is empty within ~5 s of any completion finishing
+
+That gap is the entire point of this repo: latency depends on whether you happen
+to catch the backend alive, which is why the Pi page reports `LOADED` (resident
+right now, lapsing) separately from `WARM` (something is holding it up).
+
+Cold-case throughput measured ~2.3 tok/s (38 tokens in 16.8 s, including the
+load). The warm case looked far better but wasn't measured with a controlled
+token count — treat warm tok/s as unestablished rather than quoting a number.
 
 There's no external config that changes this, so `qwen-control` keeps the backend
 alive the blunt way: **keep-warm** fires a 1-token completion every 45 s for a

@@ -116,6 +116,10 @@ launchctl bootout "gui/$UID_NUM/$AGENT_LABEL" 2>/dev/null || true
 sleep 1
 launchctl bootstrap "gui/$UID_NUM" "$LA/$AGENT_LABEL.plist" 2>/dev/null \
   || launchctl load -w "$LA/$AGENT_LABEL.plist" 2>/dev/null || true
+# RunAtLoad doesn't reliably spawn the process immediately here, which made the
+# health check below fail spuriously on a fresh install. Safe: the service is
+# loaded by this point, which is the precondition kickstart actually needs.
+launchctl kickstart -k "gui/$UID_NUM/$AGENT_LABEL" 2>/dev/null || true
 sleep 2
 launchctl print "gui/$UID_NUM/$AGENT_LABEL" >/dev/null 2>&1 \
   && say "agent service loaded" \
@@ -140,7 +144,9 @@ if command -v swiftc >/dev/null 2>&1; then
   <key>LSUIElement</key><true/>
 </dict></plist>
 EOF
-  swiftc -O -parse-as-library=false \
+  # No -parse-as-library: it's a presence/absence flag with no =false form, and
+  # main.swift wants top-level code anyway.
+  swiftc -O \
     -target "$(uname -m)-apple-macos12.0" \
     -framework AppKit \
     -o "$APP_DIR/Contents/MacOS/QwenMenu" \

@@ -452,8 +452,31 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     _load_counters()
     threading.Thread(target=keepwarm_loop, daemon=True).start()
-    host = BIND_HOST or "127.0.0.1"
-    srv = ThreadingHTTPServer((host, PORT), Handler)
+
+    # Two listeners, not one. The auth model trusts 127.0.0.1 so the menu bar app
+    # doesn't have to hold a secret, and the menu bar app talks to loopback -- so
+    # binding only the Tailscale IP left it unable to reach its own agent. Bind
+    # both explicitly rather than 0.0.0.0, which would expose this to the LAN.
+    servers = []
+    hosts = ["127.0.0.1"]
+    if BIND_HOST and BIND_HOST != "127.0.0.1":
+        hosts.append(BIND_HOST)
+
+    for host in hosts:
+        try:
+            srv = ThreadingHTTPServer((host, PORT), Handler)
+            servers.append((host, srv))
+        except OSError as exc:
+            print(f"could not bind {host}:{PORT} -- {exc}", flush=True)
+
+    if not servers:
+        raise SystemExit(f"no listener could bind port {PORT}")
+
+    for host, srv in servers[:-1]:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        print(f"qwen-control on http://{host}:{PORT}", flush=True)
+
+    host, srv = servers[-1]
     print(f"qwen-control on http://{host}:{PORT} (model {MODEL})", flush=True)
     srv.serve_forever()
 
