@@ -19,48 +19,122 @@ best-effort Wake-on-LAN packet). It's the control surface; the Mac is the muscle
 
 ## What "turn on" actually means here
 
-Worth being blunt, because the naive mental model is wrong on this machine.
+This section has been wrong twice. The current version was settled on 2026-07-29
+from the Mac's own LocalAI log and LaunchAgent plist, and the two earlier claims
+are recorded below so nobody re-derives them.
 
-LocalAI **spawns the llama-cpp backend per request and reaps it seconds after the
-response.** Verified on 2026-07-29, and the Pi's own dashboard shows the backend
-process has read `down` since 2026-07-28 22:22. So:
+### The actual mechanism
 
-- a request arriving **after** the backend was reaped pays roughly **8 s of cold start**
-- a request arriving **while it's still alive** is fast — measured 1.60 s then
-  1.05 s for a 20-token completion, back to back, on the Mac itself
+Two separate LocalAI features act on this model, and confusing them produced both
+earlier mistakes. Both are set on the command line in
+`~/Library/LaunchAgents/com.localai.server.plist` — not in a `.env`, and not in the
+model YAML, which has no watchdog keys at all:
 
-That gap is the entire point of this repo: latency depends on whether you happen
-to catch the backend alive, which is why the Pi page reports `LOADED` (resident
-right now, lapsing) separately from `WARM` (something is holding it up).
+```
+--enable-watchdog-idle --watchdog-idle-timeout=3m --enable-memory-reclaimer
+```
 
-Cold-case throughput measured ~2.3 tok/s (38 tokens in 16.8 s, including the
-load). The warm case looked far better but wasn't measured with a controlled
-token count — treat warm tok/s as unestablished rather than quoting a number.
+**The memory reclaimer is the one that matters.** It evicts the least-recently-used
+model when GPU memory use exceeds 95% of the Metal working-set budget. On this Mac
+that budget is ~48 GiB (75% of 64 GiB, `iogpu.wired_limit_mb` unset) and the model
+alone occupies ~47.8 GiB — about **99.7%**. The eviction condition is therefore
+true the entire time the model is loaded. Logged `usage_percent` values: 99.79,
+99.82, 99.80, against `threshold_percent=95`.
 
-### ⚠️ But how often the backend is actually reaped is unresolved
+The reclaimer skips a model that has active API calls, so it fires the instant a
+request finishes:
 
-Stated plainly because it changes what this repo is for. The per-request reaping
-above was measured in a ~25 minute window on 2026-07-29 — `loaded_models` empty
-across ten checks over 68 s, reproduced after a full LocalAI restart. Hours later
-the model was **resident with keep-warm off and the last ping over an hour
-earlier**, and stayed resident across six polls over three minutes with no
-inference traffic at all.
+```
+WARN [WatchDog] Memory usage exceeds threshold, evicting LRU backend type="GPU" usage_percent=99.79 threshold_percent=95
+WARN [WatchDog] Skipping memory reclaimer eviction for busy model model="qwen2.5-72b" reason="model has active API calls"
+INFO [WatchDog] Memory reclaimer evicting LRU model model="qwen2.5-72b"
+```
 
-The likely explanation is that the reaping was a *symptom of memory pressure* —
-that window is exactly when repeated 47 GB loads drove the machine into thrashing
-(LAN ping 10 ms → 718 ms, Tailscale offline, eventually needing physical
-attention). If that's right then **keep-warm is mostly unnecessary** and the 8 s
-cold start is not the normal case. Not yet established either way; settling it is
-the first task in the audit brief, and needs the Mac's own logs.
+That — not a per-request design — is what produced the "reaped ~5 s after every
+response" behaviour. It is a memory-pressure symptom, and it will come back
+whenever anything else wants GPU memory.
 
-There's no external config that changes this, so `qwen-control` keeps the backend
-alive the blunt way: **keep-warm** fires a 1-token completion every 45 s for a
-bounded window (30 min by default, 4 h ceiling). It trades idle power and heat
-for latency, deliberately, and expires on its own so it can't be left burning.
+**The idle watchdog fires but does not work.** It triggers ~3 min after each
+request, exactly as configured, and then fails to tear the backend down:
 
-If you'd rather fix it properly at the source, the thing to investigate on the
-Mac is LocalAI's watchdog (`WATCHDOG_IDLE`, `WATCHDOG_IDLE_TIMEOUT`,
-`single_active_backend`) and the model YAML — see *Open question* below.
+```
+WARN [WatchDog] Address unresolvable address="127.0.0.1:56110"
+```
+
+`127.0.0.1:56110` was listening and serving throughout (`lsof` confirms it, and
+requests to it succeeded). So idle reaping is currently broken, and **that broken
+teardown is the only reason the model stays resident.** Residency here is an
+accident, not a guarantee.
+
+### Two corrections to earlier versions of this file
+
+- ~~"LocalAI spawns the backend per request and reaps it seconds after the
+  response."~~ Only true while the reclaimer is winning, i.e. under memory pressure.
+- ~~"`[WatchDog] Address unresolvable` appears when a backend is reaped."~~ It means
+  the opposite: the watchdog tried to reap and *failed*. The process survives.
+
+Also worth knowing: **the Pi sends a chat completion every ~10 minutes**
+(caught at 13:02:11 from `100.x.x.x`, the Pi's tailnet IP, and visible as an
+unbroken ~602 s cadence in the log back to 2026-07-28 16:30). Any "the model
+stayed resident for an hour with keep-warm off" observation on this system is
+measuring that heartbeat, not idle residency. True no-traffic residency has still
+never been measured, because nothing lets the Mac idle for more than ~10 minutes.
+
+### Throughput
+
+Fixed prompt, `max_tokens=64`, `temperature=0`, counting
+`usage.completion_tokens` rather than assuming the requested tokens arrived.
+
+| Condition | Wall time | Completion tokens | tok/s |
+|---|---|---|---|
+| warm (backend stably resident) | 17.4 s, 18.2 s, 18.4 s | 64 each | **~3.5** |
+| cold (after `/backend/shutdown`) | 26.8 s, 27.2 s, 29.8 s | 64 each | ~2.2–2.4 |
+
+Cold costs roughly **9–12 s of load** on top of generation, which is where the old
+"2.3 tok/s" figure came from — it divided 38 tokens by a wall time that included
+the load. There is no 2.3-vs-3.5 mystery: generation runs ~3.5 tok/s either way.
+
+One caveat on method, because it is the whole point of hazard 3. After four loads
+in quick succession the machine entered the reclaimer-evicting state described
+above: `/state` began reporting `model_resident: false` while a backend pid still
+existed, and a nominally "warm" run took 30.5 s because it was silently paying a
+reload. Measurement was stopped there. The warm row above is the first batch only,
+taken while the backend was stably resident; the contaminated run is excluded
+rather than averaged in. Don't extend this table by brute force.
+
+The earlier "1.05 s warm" figures were a 20-token *request* that almost certainly
+returned only a couple of tokens; at 3.5 tok/s, 20 real tokens cannot arrive in
+1.05 s. This is exactly why the table above reports `completion_tokens`.
+
+~3.5 tok/s is unremarkable for a 44 GiB model on an M2 Max — memory-bandwidth
+bound, and it is genuinely using the Metal backend (see below), so there is no
+misconfiguration to recover here.
+
+### It is on the Metal backend
+
+Worth confirming because a CPU build would have explained the slow figures. It
+didn't need explaining. The running process is
+`data/backends/metal-llama-cpp/llama-cpp-cpu-all`, whose name is about bundled CPU
+feature variants, not the compute backend — ggml loads its backend `.so` at
+runtime, and the live process has `libggml-metal.so` and Apple's `AGXMetalG14X`
+GPU driver mapped. All three registered backend names (`llama-cpp`,
+`localai@llama-cpp`, `metal-llama-cpp`) resolve to the same Metal build; there is
+no generic CPU llama-cpp installed.
+
+### So what is keep-warm for now?
+
+Less than it was built for. It is a hedge against the reclaimer winning a race,
+not the load-bearing mechanism — and **no ping interval can prevent a reclaimer
+eviction**, only reducing the model's footprint or disabling the reclaimer can.
+
+It fires a 1-token completion every **120 s** for a bounded window (30 min by
+default, 4 h ceiling). 120 s is chosen against the real
+`--watchdog-idle-timeout=3m`: it has to stay inside 180 s to do anything, with
+margin for a slow ping. The old 45 s interval was three times more often than
+needed and spent power and heat for it.
+
+The Pi page's `LOADED` (resident now) vs `WARM` (something is holding it up)
+distinction is still correct and still worth keeping.
 
 ## Install
 
@@ -88,7 +162,7 @@ menu bar app doesn't need to hold a secret.
 
 | Route | Effect |
 |---|---|
-| `GET /state` | everything: server up, backend alive, model resident, keep-warm window, caffeinate, AC vs battery, GPU bytes, request counts |
+| `GET /state` | everything: server up, backend alive, model resident, keep-warm window, caffeinate, AC vs battery, GPU bytes, request counts, `caveats` |
 | `POST /on` | caffeinate + start server if needed + keep-warm + warm once |
 | `POST /off` | release keep-warm, unload the model, release caffeinate — **leaves the API server up** |
 | `POST /warm` | one warm-up completion |
@@ -123,10 +197,52 @@ bootout → bootstrap → verify, never kickstart-on-unloaded.
   close. The real contract is "don't idle-sleep while plugged in."
 - **Keep-warm costs power and heat** on an M2 Max holding a 72B model. That's why
   it's bounded and self-expiring rather than a plain on/off switch.
+- **On battery, both of the above get worse, and the agent now says so.** `/state`
+  and the `POST /on` response carry a `caveats` array, and the menu bar shows
+  *"On battery — sleeps on lid close"* above the action items. It is a warning, not
+  a veto: nothing refuses to run on battery, because the person pressing the button
+  may well know the lid is staying open.
+- **Requests today is LocalAI's number, not ours.** The agent sits beside LocalAI,
+  not in front of it, so it cannot see inbound traffic; it reads
+  `api_call_count{path="/v1/chat/completions"}` from LocalAI's `/metrics` and stores
+  a daily baseline, re-baselining when the counter goes backwards (a LocalAI
+  restart). If `/metrics` can't be read the menu shows *unavailable* rather than a
+  number. It previously showed a hardcoded-zero counter plus the agent's own
+  warm-ups, which was wrong in both directions. First run after install undercounts
+  the day, because the baseline can only start when the agent first looks.
 
-## Open question
+## Open questions
 
-Whether LocalAI can be made to hold the backend resident properly, instead of
-being kept alive by a ping. Worth an hour with the LocalAI watchdog settings and
-the `qwen2.5-72b` model YAML on the Mac. If it can, keep-warm becomes a fallback
-rather than the mechanism, and the ~8 s cold start and 2.3 tok/s both improve.
+The watchdog/model-YAML question is **answered** — see *The actual mechanism*. What
+is left is narrower and needs a decision rather than an investigation.
+
+**1. Should the memory reclaimer stay on?** As configured it is structurally
+incompatible with this model on this machine: 47.8 GiB against a 45.6 GiB (95%)
+threshold means "evict" is always true. Dropping `--enable-memory-reclaimer` would
+make residency reliable instead of accidental, and would remove the ~9–12 s cold
+start from most requests.
+
+The tradeoff is real and it is not obviously worth taking: it pins ~47 GiB of a
+64 GiB daily-driver laptop, leaving ~16 GiB for everything else, and the reclaimer
+is the thing currently protecting the machine from the state that took it off the
+network on 2026-07-29. It also requires editing
+`com.localai.server.plist` — see the warning above about what that costs when it
+goes wrong. **Not changed here; ask before doing it.**
+
+A gentler version: leave the reclaimer on and reduce the footprint instead, so it
+sits below the threshold rather than permanently above it. `context_size: 8192`
+with LocalAI's auto-tuned `parallel="8"` is the obvious place to look.
+
+**2. Why is the idle watchdog's teardown broken?** `Address unresolvable` for a
+port that is demonstrably listening suggests LocalAI is holding stale or
+mis-keyed address bookkeeping for this backend — plausibly related to the
+`localai@llama-cpp` → `metal-llama-cpp` meta-backend aliasing. This is inferred,
+not established; it would need LocalAI's source to confirm. Low priority, since the
+bug currently helps.
+
+**3. What is the Pi's 10-minute heartbeat for?** It pins ~47 GiB resident around
+the clock, including overnight on battery, which is a lot to spend on a liveness
+check. The Pi also polls `GET /v1/models` every ~60 s, which the audit brief
+already identified as useless for residency (it lists configured models, so it
+always says "fine"). Both belong in the Pi repo, not this one, but a `GET /system`
+poll would answer the residency question without loading anything.
