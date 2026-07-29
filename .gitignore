@@ -1,3 +1,4 @@
 *.log
 *.err
 .DS_Store
+.agent-token

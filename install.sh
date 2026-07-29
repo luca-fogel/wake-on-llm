@@ -25,6 +25,12 @@ MENU_LABEL="com.foggylulu.qwen-menu"
 
 # ---------------------------------------------------------------- token
 TOKEN="${QWEN_AGENT_TOKEN:-${1:-}}"
+# Shipped alongside the source, so the token never has to be pasted into a chat
+# or a shell history to install this.
+if [[ -z "$TOKEN" && -f "$SRC/.agent-token" ]]; then
+  TOKEN="$(tr -d '[:space:]' < "$SRC/.agent-token")"
+  [[ -n "$TOKEN" ]] && say "using the token shipped in .agent-token"
+fi
 if [[ -z "$TOKEN" && -f "$CONF_DIR/config.env" ]]; then
   TOKEN="$(sed -n 's/^QWEN_AGENT_TOKEN=//p' "$CONF_DIR/config.env" | head -1)"
   [[ -n "$TOKEN" ]] && say "reusing the token already in $CONF_DIR/config.env"
