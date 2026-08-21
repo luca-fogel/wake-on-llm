@@ -277,6 +277,16 @@ already identified as useless for residency (it lists configured models, so it
 always says "fine"). Both belong in the Pi repo, not this one, but a `GET /system`
 poll would answer the residency question without loading anything.
 
+## See also
+
+Two other pieces of the same local-AI setup:
+
+- [**mac-ai-activity**](https://github.com/foggylulu/mac-ai-activity) — what a
+  generation actually costs: joules per token, per-slot llama.cpp telemetry, die
+  temperatures.
+- [**llmctl**](https://github.com/foggylulu/llmctl) — which engines are holding
+  RAM, and one command to get it back.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
