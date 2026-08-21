@@ -55,7 +55,7 @@ fi
 say "binding the agent to $TS_IP:8121 (tailnet only, never 0.0.0.0)"
 
 # ---------------------------------------------------------------- LocalAI creds
-LOCALAI_MODEL="${LOCALAI_MODEL:-qwen2.5-72b}"
+LOCALAI_MODEL="${LOCALAI_MODEL:-qwen3.8-27b}"
 KEY="${LOCALAI_API_KEY:-}"
 PLIST="$LA/com.localai.server.plist"
 if [[ -z "$KEY" && -f "$PLIST" ]]; then
@@ -67,10 +67,19 @@ if [[ -z "$KEY" && -f "$PLIST" ]]; then
            | sed -n 's/.*--api-keys[= ]\([^<[:space:]]*\).*/\1/p' | head -1 || true)"
   fi
 fi
-if [[ -z "$KEY" && -f "$HOME/local-bridge/bridge.env" ]]; then
-  KEY="$(sed -n 's/^LOCALAI_API_KEY=//p' "$HOME/local-bridge/bridge.env" | head -1 || true)"
+if [[ -z "$KEY" && -f "$CONF_DIR/config.env" ]]; then
+  KEY="$(sed -n 's/^LOCALAI_API_KEY=//p' "$CONF_DIR/config.env" | head -1 || true)"
 fi
 [[ -n "$KEY" ]] || warn "no LocalAI API key found; if LocalAI requires one, add LOCALAI_API_KEY= to $CONF_DIR/config.env and restart the agent"
+
+# ------------------------------------------------------------- remote page URL
+# The Pi's page, on your tailnet. Optional: without it the menu bar simply omits
+# the "Open remote control" item. A tailnet hostname is yours, so it lives in
+# config and is never compiled into the app or committed.
+REMOTE_URL="${REMOTE_URL:-}"
+if [[ -z "$REMOTE_URL" && -f "$CONF_DIR/config.env" ]]; then
+  REMOTE_URL="$(sed -n 's/^REMOTE_URL=//p' "$CONF_DIR/config.env" | head -1 || true)"
+fi
 
 # ---------------------------------------------------------------- config
 say "writing $CONF_DIR/config.env"
@@ -84,6 +93,7 @@ QWEN_AGENT_PORT=8121
 LOCALAI_BASE_URL=http://127.0.0.1:8080
 LOCALAI_API_KEY=$KEY
 LOCALAI_MODEL=$LOCALAI_MODEL
+REMOTE_URL=$REMOTE_URL
 EOF
 chmod 600 "$CONF_DIR/config.env"
 
@@ -196,7 +206,7 @@ Done.
 
   Menu bar        look for the flame / moon icon near the clock
   Agent           http://$TS_IP:8121  (tailnet only, bearer token)
-  Remote control  https://pi.your-tailnet.ts.net:8463  (from the Pi)
+  Remote control  ${REMOTE_URL:-<set REMOTE_URL in $CONF_DIR/config.env>}  (from the Pi)
 
 On the Pi, confirm the two sides agree:
   curl -s http://127.0.0.1:8150/api/state | python3 -m json.tool | grep -A3 agent

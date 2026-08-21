@@ -1,6 +1,8 @@
-*.log
-*.err
-.DS_Store
+__pycache__/
 .agent-token
 .claude-flow/
-__pycache__/
+.claude/
+.DS_Store
+*.err
+*.log
+build/

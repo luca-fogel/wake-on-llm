@@ -1,13 +1,14 @@
-# qwen-control — turn the Mac's Qwen 2.5 72B on from anywhere
+# qwen-control — turn a big local model on from anywhere
 
-Two pieces that let you power a 72B local model on and off from your phone on the
-other side of the world, over Tailscale:
+Two pieces that let you power a large local model on and off from your phone on
+the other side of the world, over Tailscale. Built for a 72B; the model is a
+config value (`LOCALAI_MODEL`), and this Mac now serves a 27B:
 
 | Piece | Where | What it is |
 |---|---|---|
 | **QwenMenu.app** | Mac | menu bar icon — status at a glance, one click to toggle |
 | **qwen-control** | Mac | LaunchAgent on the Mac's Tailscale IP, `:8121` — does the things only a local process can |
-| **qwen-remote** | Pi | the page you actually open from abroad, `:8463` on the tailnet (lives in the Pi repo) |
+| **qwen-remote** | Pi | the page you actually open from abroad, `:8463` on the tailnet — **not in this repo** (see [The Pi side](#the-pi-side)) |
 
 ## Why the Pi is in the loop at all
 
@@ -74,7 +75,7 @@ accident, not a guarantee.
   the opposite: the watchdog tried to reap and *failed*. The process survives.
 
 Also worth knowing: **the Pi sends a chat completion every ~10 minutes**
-(caught at 13:02:11 from `100.x.x.x`, the Pi's tailnet IP, and visible as an
+(caught at 13:02:11 from the Pi's tailnet IP, and visible as an
 unbroken ~602 s cadence in the log back to 2026-07-28 16:30). Any "the model
 stayed resident for an hour with keep-warm off" observation on this system is
 measuring that heartbeat, not idle residency. True no-traffic residency has still
@@ -143,8 +144,12 @@ On the Mac, with the token from the Pi's `~/.config/qwen-remote/config.env`:
 ```bash
 git clone https://github.com/foggylulu/qwen-control-mac.git
 cd qwen-control-mac
-QWEN_AGENT_TOKEN=<token> ./install.sh
+QWEN_AGENT_TOKEN=<token> REMOTE_URL=https://pi.your-tailnet.ts.net:8463 ./install.sh
 ```
+
+`REMOTE_URL` is optional and only adds the "open the remote page" menu item; it
+is written to config rather than compiled in, because a tailnet hostname is
+yours. `LOCALAI_MODEL=` overrides which model the agent operates on.
 
 Idempotent — re-run to upgrade. Needs Xcode Command Line Tools for the menu bar
 app (`xcode-select --install`); without them the agent still installs and the Pi
@@ -170,6 +175,28 @@ menu bar app doesn't need to hold a secret.
 | `POST /keepwarm/on` `{"minutes":N}` / `/keepwarm/off` | bounded keep-warm window |
 | `POST /caffeinate/on` / `/caffeinate/off` | hold / release the no-sleep assertion |
 | `POST /localai/start` / `/localai/stop` | LaunchAgent control (see the warning) |
+
+## The Pi side
+
+Only the Mac half is published here. The Pi half is a small always-on web page
+plus a poller, and it needs nothing from this repo beyond the HTTP contract in
+the table above: hold the shared bearer token, `GET /state` to render, `POST /on`
+and `POST /off` for the buttons, and treat a connection failure as "the Mac is
+asleep" rather than an error — which is the one thing the Mac itself can never
+report about itself.
+
+If you are building your own, two things are worth copying and one is worth
+avoiding:
+
+- **Copy** the `LOADED` vs `WARM` distinction: resident right now, versus
+  something is actively holding it up. They fail differently.
+- **Copy** treating unreachable as a state, not a fault, with a best-effort
+  Wake-on-LAN packet attached to it.
+- **Avoid** polling `GET /v1/models` to answer "is the model there?". It lists
+  *configured* models, so it answers "fine" whether or not any weights exist on
+  disk. Verified the unhappy way: with the model files moved away, LocalAI still
+  advertised the model and every completion returned HTTP 500. Poll `GET /state`
+  on this agent, or `GET /system` on LocalAI.
 
 ## Two safety decisions worth knowing
 
@@ -216,22 +243,25 @@ bootout → bootstrap → verify, never kickstart-on-unloaded.
 The watchdog/model-YAML question is **answered** — see *The actual mechanism*. What
 is left is narrower and needs a decision rather than an investigation.
 
-**1. Should the memory reclaimer stay on?** As configured it is structurally
-incompatible with this model on this machine: 47.8 GiB against a 45.6 GiB (95%)
-threshold means "evict" is always true. Dropping `--enable-memory-reclaimer` would
-make residency reliable instead of accidental, and would remove the ~9–12 s cold
-start from most requests.
+**1. Should the memory reclaimer stay on?** — **ANSWERED: no. Removed
+2026-08-18, and it was the whole problem.**
 
-The tradeoff is real and it is not obviously worth taking: it pins ~47 GiB of a
-64 GiB daily-driver laptop, leaving ~16 GiB for everything else, and the reclaimer
-is the thing currently protecting the machine from the state that took it off the
-network on 2026-07-29. It also requires editing
-`com.localai.server.plist` — see the warning above about what that costs when it
-goes wrong. **Not changed here; ask before doing it.**
+As configured it was structurally incompatible with the model on this machine:
+47.8 GiB against a 45.6 GiB (95%) threshold means "evict" is always true, so
+every request paid a fresh 9–12 s load. Dropping `--enable-memory-reclaimer` from
+`com.localai.server.plist` took **warm time-to-first-byte from ~22 s to 0.7 s**,
+a 30x difference, and turned residency from an accident of a broken watchdog into
+the normal case. The idle watchdog was kept.
 
-A gentler version: leave the reclaimer on and reduce the footprint instead, so it
-sits below the threshold rather than permanently above it. `context_size: 8192`
-with LocalAI's auto-tuned `parallel="8"` is the obvious place to look.
+The tradeoff that made this look risky was the footprint: pinning ~47 GiB of a
+64 GiB laptop leaves ~16 GiB for everything else. Both halves of that changed
+together — the machine moved to a **27B at Q8_0 (~16 GiB)**, which is comfortably
+under the threshold rather than permanently over it, so neither the reclaimer nor
+a smaller `context_size` is needed to keep the machine usable.
+
+The measurement above was taken on the 72B configuration on 2026-08-18. The
+throughput table earlier in this file is also 72B-era; treat both as history for
+that configuration rather than as current figures for whatever you run.
 
 **2. Why is the idle watchdog's teardown broken?** `Address unresolvable` for a
 port that is demonstrably listening suggests LocalAI is holding stale or
@@ -246,3 +276,7 @@ check. The Pi also polls `GET /v1/models` every ~60 s, which the audit brief
 already identified as useless for residency (it lists configured models, so it
 always says "fine"). Both belong in the Pi repo, not this one, but a `GET /system`
 poll would answer the residency question without loading anything.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

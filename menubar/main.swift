@@ -1,4 +1,4 @@
-// QwenMenu -- menu bar control for the Mac's qwen2.5-72b.
+// QwenMenu -- menu bar control for the Mac's local LLM.
 //
 // Talks to the qwen-control agent over loopback (which is why it needs no token:
 // the agent trusts 127.0.0.1, and only demands the shared bearer from tailnet
@@ -11,8 +11,24 @@ import AppKit
 import Foundation
 
 let AGENT = "http://127.0.0.1:8121"
-let REMOTE_URL = "https://pi.your-tailnet.ts.net:8463"
 let POLL_SECONDS = 5.0
+
+/// The remote control page, read from the agent's config rather than compiled in:
+/// it is a hostname on YOUR tailnet, and a tailnet name is not something to bake
+/// into a binary or publish. Set `REMOTE_URL=https://pi.your-tailnet.ts.net:8463`
+/// in ~/.config/qwen-control/config.env. Absent, the menu item is simply hidden.
+let REMOTE_URL: String? = {
+    let path = NSHomeDirectory() + "/.config/qwen-control/config.env"
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    for line in text.split(separator: "\n") {
+        let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+        if parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces) == "REMOTE_URL" {
+            let v = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+            return v.isEmpty ? nil : v
+        }
+    }
+    return nil
+}()
 
 // MARK: - tiny JSON helpers
 
@@ -374,7 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openRemote() {
-        if let u = URL(string: REMOTE_URL) { NSWorkspace.shared.open(u) }
+        if let s = REMOTE_URL, let u = URL(string: s) { NSWorkspace.shared.open(u) }
     }
 
     @objc func doQuit() { NSApp.terminate(nil) }
