@@ -289,4 +289,5 @@ Two other pieces of the same local-AI setup:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Contributions sign off with the
+[DCO](CONTRIBUTING.md#sign-your-work-dco).
