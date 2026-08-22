@@ -1,8 +1,19 @@
-# qwen-control — turn a big local model on from anywhere
+# wake-on-llm — turn a big local model on from anywhere
 
 Two pieces that let you power a large local model on and off from your phone on
 the other side of the world, over Tailscale. Built for a 72B; the model is a
-config value (`LOCALAI_MODEL`), and this Mac now serves a 27B:
+config value (`LOCALAI_MODEL`), and the Mac it runs on now serves a 27B.
+
+The name is literal: a sleeping Mac is not on the tailnet at all, which is
+exactly when you want to turn something on, so the last resort really is a
+best-effort Wake-on-LAN packet from a machine that never sleeps. See
+[Caveats](#caveats-honestly) for how well that works — the honest answer is
+"sometimes".
+
+The installed pieces are still called `qwen-control` — the LaunchAgent label,
+`~/.config/qwen-control/`, the agent script. That is deliberate: renaming them
+would mean a bootout/reinstall dance on every machine already running this, for
+cosmetics. Read them as the historical name of the same thing.
 
 | Piece | Where | What it is |
 |---|---|---|
@@ -142,8 +153,8 @@ distinction is still correct and still worth keeping.
 On the Mac, with the token from the Pi's `~/.config/qwen-remote/config.env`:
 
 ```bash
-git clone https://github.com/foggylulu/qwen-control-mac.git
-cd qwen-control-mac
+git clone https://github.com/foggylulu/wake-on-llm.git
+cd wake-on-llm
 QWEN_AGENT_TOKEN=<token> REMOTE_URL=https://pi.your-tailnet.ts.net:8463 ./install.sh
 ```
 
