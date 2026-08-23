@@ -1,0 +1,5 @@
+# One identity, two addresses and two spellings. Canonical is the name and
+# address the other public repositories use; a mailmap changes presentation,
+# not the record.
+foggylulu <fogelrobion.l@northeastern.edu> <lf41108@nulondon.ac.uk>
+foggylulu <fogelrobion.l@northeastern.edu> Luca Fogel Robion <fogelrobion.l@northeastern.edu>
