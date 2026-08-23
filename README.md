@@ -298,6 +298,10 @@ Two other pieces of the same local-AI setup:
 - [**llmctl**](https://github.com/foggylulu/llmctl) — which engines are holding
   RAM, and one command to get it back.
 
+- [**solvr-ai**](https://github.com/foggylulu/solvr-ai) — a maths tutor app for
+  iOS and macOS that runs against a hosted API, a local server, or Apple's
+  on-device model, and measures the difference.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Contributions sign off with the
