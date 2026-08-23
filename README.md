@@ -283,10 +283,10 @@ bug currently helps.
 
 **3. What is the Pi's 10-minute heartbeat for?** It pins ~47 GiB resident around
 the clock, including overnight on battery, which is a lot to spend on a liveness
-check. The Pi also polls `GET /v1/models` every ~60 s, which the audit brief
-already identified as useless for residency (it lists configured models, so it
-always says "fine"). Both belong in the Pi repo, not this one, but a `GET /system`
-poll would answer the residency question without loading anything.
+check. The Pi also polls `GET /v1/models` every ~60 s, which answers the wrong
+question for residency: it lists configured models, so it says "fine" whether or
+not any weights are loaded. Both belong in the Pi repo, not this one, but a
+`GET /system` poll would answer the residency question without loading anything.
 
 ## See also
 
