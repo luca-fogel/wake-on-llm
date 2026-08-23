@@ -38,6 +38,7 @@ make on its own.
 
 stdlib only; macOS ships a usable python3. No pip install.
 """
+import hmac
 import json
 import os
 import subprocess
@@ -596,7 +597,13 @@ class Handler(BaseHTTPRequestHandler):
         if peer in ("127.0.0.1", "::1"):
             return True
         got = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        return bool(TOKEN) and got == TOKEN
+        # compare_digest, not ==, so the comparison time carries no information
+        # about how many leading bytes were right. It refuses str with non-ASCII,
+        # and this header is attacker-controlled, so compare the bytes instead --
+        # latin-1 is the encoding http.server already decoded the header from.
+        return bool(TOKEN) and hmac.compare_digest(
+            got.encode("latin-1", "replace"), TOKEN.encode("latin-1", "replace")
+        )
 
     def _body(self):
         try:
