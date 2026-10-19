@@ -153,7 +153,7 @@ distinction is still correct and still worth keeping.
 On the Mac, with the token from the Pi's `~/.config/qwen-remote/config.env`:
 
 ```bash
-git clone https://github.com/foggylulu/wake-on-llm.git
+git clone https://github.com/luca-fogel/wake-on-llm.git
 cd wake-on-llm
 QWEN_AGENT_TOKEN=<token> REMOTE_URL=https://pi.your-tailnet.ts.net:8463 ./install.sh
 ```
@@ -292,13 +292,13 @@ not any weights are loaded. Both belong in the Pi repo, not this one, but a
 
 Two other pieces of the same local-AI setup:
 
-- [**mac-ai-activity**](https://github.com/foggylulu/mac-ai-activity) — what a
+- [**mac-ai-activity**](https://github.com/luca-fogel/mac-ai-activity) — what a
   generation actually costs: joules per token, per-slot llama.cpp telemetry, die
   temperatures.
-- [**llmctl**](https://github.com/foggylulu/llmctl) — which engines are holding
+- [**llmctl**](https://github.com/luca-fogel/llmctl) — which engines are holding
   RAM, and one command to get it back.
 
-- [**solvr-ai**](https://github.com/foggylulu/solvr-ai) — a maths tutor app for
+- [**solvr-ai**](https://github.com/luca-fogel/solvr-ai) — a maths tutor app for
   iOS and macOS that runs entirely on Apple's on-device model: no API key, no
   server, no network.
 
