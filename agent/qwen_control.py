@@ -41,12 +41,14 @@ stdlib only; macOS ships a usable python3. No pip install.
 import hmac
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -93,6 +95,12 @@ PORT = int(CFG.get("QWEN_AGENT_PORT", "8121"))
 LOCALAI_BASE = CFG.get("LOCALAI_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 LOCALAI_KEY = CFG.get("LOCALAI_API_KEY", "")
 MODEL = CFG.get("LOCALAI_MODEL", "qwen2.5-72b")
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", BIND_HOST.lower()} | {
+    host.strip().lower() for host in CFG.get("QWEN_AGENT_ALLOWED_HOSTS", "").split(",") if host.strip()
+}
+ALLOWED_ORIGINS = {origin.strip() for origin in CFG.get("QWEN_AGENT_ALLOWED_ORIGINS", "").split(",") if origin.strip()}
+MAX_BODY_BYTES = 4096
+BODY_TIMEOUT_SECONDS = 5
 
 if not TOKEN:
     raise SystemExit(f"refusing to start without QWEN_AGENT_TOKEN in {CONF_FILE}")
@@ -578,6 +586,10 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "qwen-control"
     protocol_version = "HTTP/1.1"
 
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(BODY_TIMEOUT_SECONDS)
+
     def log_message(self, *args):
         pass
 
@@ -591,11 +603,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _authed(self):
-        # Loopback is the menu bar app on this same machine; everything arriving
-        # over the tailnet must present the shared token.
-        peer = self.client_address[0]
-        if peer in ("127.0.0.1", "::1"):
-            return True
+        # A loopback address identifies the machine, not the user or application.
+        # The menu bar app reads the same owner-only config as this agent.
         got = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
         # compare_digest, not ==, so the comparison time carries no information
         # about how many leading bytes were right. It refuses str with non-ASCII,
@@ -605,20 +614,64 @@ class Handler(BaseHTTPRequestHandler):
             got.encode("latin-1", "replace"), TOKEN.encode("latin-1", "replace")
         )
 
-    def _body(self):
+    def _trusted_request(self):
         try:
-            n = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(n).decode()) if n else {}
-        except Exception:
-            return {}
+            hosts = self.headers.get_all("Host", [])
+            if len(hosts) != 1:
+                return False
+            host = urlsplit("//" + hosts[0])
+            if (host.hostname not in ALLOWED_HOSTS or host.username is not None
+                    or host.password is not None or host.path or host.query or host.fragment
+                    or (host.port or 80) != self.server.server_port):
+                return False
+            origins = self.headers.get_all("Origin", [])
+            return not origins or (len(origins) == 1 and origins[0] != "null" and origins[0] in ALLOWED_ORIGINS)
+        except ValueError:
+            return False
+
+    def _reject(self, status, message):
+        # Never reuse a connection whose body has not been consumed.
+        self.close_connection = True
+        self._json(status, {"error": message})
+
+    def _body(self):
+        if self.headers.get("Transfer-Encoding"):
+            raise ValueError("transfer encoding is unsupported")
+        if self.headers.get_content_type() != "application/json":
+            raise ValueError("Content-Type must be application/json")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+            raise ValueError("one valid Content-Length is required")
+        n = int(lengths[0])
+        if not 0 < n <= MAX_BODY_BYTES:
+            raise ValueError("request body must contain 1 to 4096 bytes")
+        deadline = time.monotonic() + BODY_TIMEOUT_SECONDS
+        data = bytearray()
+        while len(data) < n:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("request body timed out")
+            self.connection.settimeout(remaining)
+            chunk = self.rfile.read1(n - len(data))
+            if not chunk:
+                raise ValueError("incomplete request body")
+            data.extend(chunk)
+        body = json.loads(data.decode("utf-8"))
+        if not isinstance(body, dict):
+            raise ValueError("request body must be a JSON object")
+        self.connection.settimeout(BODY_TIMEOUT_SECONDS)
+        return body
 
     def do_GET(self):
+        if not self._trusted_request():
+            self._reject(403, "untrusted Host or Origin")
+            return
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path == "/health":
             self._json(200, {"status": "ok", "service": "qwen-control"})
             return
         if not self._authed():
-            self._json(401, {"error": "unauthorized"})
+            self._reject(401, "unauthorized")
             return
         if path in ("/", "/state"):
             self._json(200, build_state())
@@ -626,14 +679,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._trusted_request():
+            self._reject(403, "untrusted Host or Origin")
+            return
         if not self._authed():
-            self._json(401, {"error": "unauthorized"})
+            self._reject(401, "unauthorized")
             return
         path = self.path.split("?")[0].rstrip("/")
-        body = self._body()
-
         if path not in _POST_ROUTES:
-            self._json(404, {"error": "not found"})
+            self._reject(404, "not found")
+            return
+        try:
+            body = self._body()
+        except (TimeoutError, socket.timeout):
+            self._reject(408, "request body timed out")
+            return
+        except (ValueError, UnicodeDecodeError):
+            self._reject(400, "invalid JSON object or request framing")
             return
 
         # Every mutating route is serialised. Refuse rather than queue: a second
@@ -724,10 +786,8 @@ def main():
     _load_counters()
     threading.Thread(target=keepwarm_loop, daemon=True).start()
 
-    # Two listeners, not one. The auth model trusts 127.0.0.1 so the menu bar app
-    # doesn't have to hold a secret, and the menu bar app talks to loopback -- so
-    # binding only the Tailscale IP left it unable to reach its own agent. Bind
-    # both explicitly rather than 0.0.0.0, which would expose this to the LAN.
+    # Bind loopback for the menu bar and the explicit Tailscale address for the
+    # remote client. Both listeners require the same bearer token.
     servers = []
     hosts = ["127.0.0.1"]
     if BIND_HOST and BIND_HOST != "127.0.0.1":

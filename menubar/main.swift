@@ -1,8 +1,7 @@
 // QwenMenu -- menu bar control for the Mac's local LLM.
 //
-// Talks to the qwen-control agent over loopback (which is why it needs no token:
-// the agent trusts 127.0.0.1, and only demands the shared bearer from tailnet
-// callers). Pure AppKit, one file, built with swiftc -- no Xcode project, no
+// Talks to qwen-control over authenticated loopback using its owner-only config.
+// Pure AppKit, one file, built with swiftc -- no Xcode project, no
 // SwiftUI, no dependencies to drift.
 //
 // Named main.swift on purpose: swiftc only allows top-level statements there.
@@ -12,6 +11,19 @@ import Foundation
 
 let AGENT = "http://127.0.0.1:8121"
 let POLL_SECONDS = 5.0
+
+func agentConfigValue(_ key: String) -> String? {
+    let path = NSHomeDirectory() + "/.config/qwen-control/config.env"
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    for line in text.split(separator: "\n") {
+        let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        if parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces) == key {
+            let value = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+            return value.isEmpty ? nil : value
+        }
+    }
+    return nil
+}
 
 /// The remote control page, read from the agent's config rather than compiled in:
 /// it is a hostname on YOUR tailnet, and a tailnet name is not something to bake
@@ -70,16 +82,18 @@ enum Agent {
     private static func request(_ path: String, method: String, body: [String: Any]?,
                                done: @escaping ([String: Any]?) -> Void) {
         guard let url = URL(string: AGENT + path) else { done(nil); return }
+        guard let token = agentConfigValue("QWEN_AGENT_TOKEN") else { done(nil); return }
         var req = URLRequest(url: url)
         req.httpMethod = method
+        req.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         // Must stay above the agent's own worst case for /on: up to 60s waiting for
         // LocalAI's LaunchAgent to answer, plus a 180s warm-up timeout = 240s. 330
         // leaves margin; anything below 240 would time out here while the agent was
         // still legitimately working.
         req.timeoutInterval = 330
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let body = body {
-            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        if method == "POST" {
+            req.httpBody = try? JSONSerialization.data(withJSONObject: body ?? [:])
         }
         URLSession.shared.dataTask(with: req) { data, _, _ in
             var parsed: [String: Any]? = nil

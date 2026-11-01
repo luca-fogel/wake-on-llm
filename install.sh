@@ -81,6 +81,14 @@ if [[ -z "$REMOTE_URL" && -f "$CONF_DIR/config.env" ]]; then
   REMOTE_URL="$(sed -n 's/^REMOTE_URL=//p' "$CONF_DIR/config.env" | head -1 || true)"
 fi
 
+# Preserve explicit request allowlists when upgrading an existing installation.
+ALLOWED_HOSTS="${QWEN_AGENT_ALLOWED_HOSTS:-}"
+ALLOWED_ORIGINS="${QWEN_AGENT_ALLOWED_ORIGINS:-}"
+if [[ -f "$CONF_DIR/config.env" ]]; then
+  [[ -n "$ALLOWED_HOSTS" ]] || ALLOWED_HOSTS="$(sed -n 's/^QWEN_AGENT_ALLOWED_HOSTS=//p' "$CONF_DIR/config.env" | head -1 || true)"
+  [[ -n "$ALLOWED_ORIGINS" ]] || ALLOWED_ORIGINS="$(sed -n 's/^QWEN_AGENT_ALLOWED_ORIGINS=//p' "$CONF_DIR/config.env" | head -1 || true)"
+fi
+
 # ---------------------------------------------------------------- config
 say "writing $CONF_DIR/config.env"
 mkdir -p "$CONF_DIR"
@@ -90,6 +98,8 @@ cat > "$CONF_DIR/config.env" <<EOF
 QWEN_AGENT_TOKEN=$TOKEN
 QWEN_AGENT_BIND=$TS_IP
 QWEN_AGENT_PORT=8121
+QWEN_AGENT_ALLOWED_HOSTS=$ALLOWED_HOSTS
+QWEN_AGENT_ALLOWED_ORIGINS=$ALLOWED_ORIGINS
 LOCALAI_BASE_URL=http://127.0.0.1:8080
 LOCALAI_API_KEY=$KEY
 LOCALAI_MODEL=$LOCALAI_MODEL

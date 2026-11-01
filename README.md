@@ -173,8 +173,17 @@ API key in the existing LocalAI plist / bridge env. Override either with
 ## API
 
 `GET /health` is open (no auth). Everything else needs
-`Authorization: Bearer <token>` — except from `127.0.0.1`, which is trusted so the
-menu bar app doesn't need to hold a secret.
+`Authorization: Bearer <token>`, including requests over loopback. The menu bar
+reads the token from the same owner-only `~/.config/qwen-control/config.env` file
+as the agent. Re-run the installer to update both components together.
+
+POST requests require `Content-Type: application/json` and a JSON object (send
+`{}` when there are no arguments). Bodies are limited to 4 KiB and five seconds.
+Native clients omit `Origin`; browser origins are rejected unless explicitly
+listed in `QWEN_AGENT_ALLOWED_ORIGINS` (comma-separated exact origins). The Host
+must be localhost, a listener IP, or an explicitly configured
+`QWEN_AGENT_ALLOWED_HOSTS` name, with the agent's port. Remote browser interfaces
+should proxy requests through their authenticated backend.
 
 | Route | Effect |
 |---|---|
